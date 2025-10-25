@@ -12,12 +12,12 @@ app.use(express.json());
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 
-// Free model priority
+// 🔥 2025年最新模型配置（更新！）
 const freeModelPriority = [
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
-  'gemini-1.0-pro',
-  'gemini-pro'
+  'gemini-2.5-flash',      // 最新最快
+  'gemini-2.0-flash',      // 2025年1月版本
+  'gemini-2.5-pro',        // 最強但較慢
+  'gemini-2.0-flash-lite'  // 輕量備用
 ];
 
 let cachedModel = null;
@@ -83,6 +83,8 @@ ${trend ? `
 - Change Rate: ${trend.changeRate}
 - Priority: ${trend.priority}
 ` : ''}
+
+⏱️ **Important**: Please complete your response within 30 seconds. Be concise but thorough.
 
 Please provide comprehensive health advice in the following JSON structure:
 
@@ -198,28 +200,36 @@ Important principles:
 4. Consider user's personal situation and historical trends
 5. Provide immediately actionable items
 6. Balance professionalism with understandability
-7. Give positive encouragement while remaining realistic`;
+7. Give positive encouragement while remaining realistic
+8. **Complete within 30 seconds** to ensure timely response`;
 }
 
-// Get available model
+// 🔥 改進的模型獲取函數（增加重試和詳細日誌）
 async function getAvailableModel() {
   for (const modelName of freeModelPriority) {
     try {
-      console.log(`🔍 Testing free model: ${modelName}`);
+      console.log(`🔍 Testing model: ${modelName}`);
       const model = genAI.getGenerativeModel({ model: modelName });
       
-      const testResult = await model.generateContent('Hello');
+      // 快速測試
+      const testResult = await Promise.race([
+        model.generateContent('test'),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Test timeout')), 5000)
+        )
+      ]);
+      
       const testResponse = await testResult.response;
       await testResponse.text();
       
-      console.log(`✅ Free model available: ${modelName}`);
+      console.log(`✅ Model available: ${modelName}`);
       return { model, modelName };
     } catch (err) {
       console.log(`❌ Model ${modelName} unavailable: ${err.message}`);
       continue;
     }
   }
-  throw new Error('❌ No available free models found');
+  throw new Error('❌ No available models found');
 }
 
 // Health check endpoint
@@ -228,10 +238,11 @@ app.get('/', (req, res) => {
     message: 'Health Advisor AI API is running!',
     status: 'healthy',
     timestamp: new Date().toISOString(),
-    version: '2.0.0',
+    version: '2.5.0',
+    currentModel: cachedModelName || 'not initialized',
     features: [
       'Personalized Health Analysis',
-      'AI-Powered Recommendations', 
+      'AI-Powered Recommendations (Gemini 2.5)', 
       'Trend Analysis',
       'Multi-language Support',
       'Emergency Detection'
@@ -278,6 +289,7 @@ app.post('/api/health-advice', async (req, res) => {
   try {
     // Get or use cached model
     if (!cachedModel) {
+      console.log('🔄 Initializing model...');
       const result = await getAvailableModel();
       cachedModel = result.model;
       cachedModelName = result.modelName;
@@ -295,10 +307,22 @@ app.post('/api/health-advice', async (req, res) => {
       previousRecords
     });
 
-    // Generate AI advice
-    const result = await cachedModel.generateContent(healthPrompt);
+    console.log('🧠 Generating AI advice...');
+    const startTime = Date.now();
+
+    // 🔥 增加超時到 45 秒
+    const result = await Promise.race([
+      cachedModel.generateContent(healthPrompt),
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('AI response timeout')), 45000)
+      )
+    ]);
+
     const response = await result.response;
     let adviceText = response.text();
+    const responseTime = Date.now() - startTime;
+
+    console.log(`✅ AI response completed in ${responseTime}ms`);
 
     // Parse JSON response
     let structuredAdvice;
@@ -310,7 +334,7 @@ app.post('/api/health-advice', async (req, res) => {
         throw new Error('Cannot extract JSON');
       }
     } catch (parseError) {
-      console.log('JSON parsing failed, using fallback');
+      console.log('⚠️ JSON parsing failed, using fallback');
       structuredAdvice = generateFallbackAdvice(
         bristolType, 
         colorAnalysis, 
@@ -323,7 +347,8 @@ app.post('/api/health-advice', async (req, res) => {
       generatedAt: new Date().toISOString(),
       model: cachedModelName,
       requestId: generateRequestId(),
-      version: '2.0.0'
+      version: '2.5.0',
+      responseTime: responseTime
     };
 
     res.json({
@@ -331,11 +356,19 @@ app.post('/api/health-advice', async (req, res) => {
       advice: structuredAdvice,
       model: cachedModelName,
       timestamp: new Date().toISOString(),
-      confidence: calculateConfidence(bristolType, colorAnalysis, volumeAnalysis)
+      confidence: calculateConfidence(bristolType, colorAnalysis, volumeAnalysis),
+      responseTime: responseTime
     });
 
   } catch (err) {
     console.error('❌ Health advice generation error:', err);
+    
+    // 清除失效的快取模型
+    if (err.message.includes('timeout') || err.message.includes('404')) {
+      console.log('🔄 Clearing cached model due to error');
+      cachedModel = null;
+      cachedModelName = null;
+    }
     
     // Use fallback advice
     const fallbackAdvice = generateFallbackAdvice(
@@ -349,7 +382,8 @@ app.post('/api/health-advice', async (req, res) => {
       advice: fallbackAdvice,
       model: 'fallback',
       timestamp: new Date().toISOString(),
-      confidence: 0.7
+      confidence: 0.7,
+      note: 'Using fallback advice due to AI service issue'
     });
   }
 });
@@ -946,10 +980,13 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Health Advisor AI API running on port ${PORT}`);
+  console.log('\n========================================');
+  console.log(`🚀 Health Advisor AI API v2.5.0`);
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`🤖 Models: Gemini 2.5 Flash (primary)`);
   console.log(`📊 Health advice: http://localhost:${PORT}/api/health-advice`);
   console.log(`⚡ Quick advice: http://localhost:${PORT}/api/quick-advice`);
   console.log(`💚 Health check: http://localhost:${PORT}/`);
-  console.log(`🎯 Using free Google AI Studio API`);
   console.log(`🌍 English version ready!`);
+  console.log('========================================\n');
 });
