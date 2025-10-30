@@ -138,7 +138,8 @@ function createHealthAnalysisPrompt({
   userProfile,
   previousRecords
 }) {
-  const healthScore = calculateHealthScore(bristolType, colorAnalysis, volumeAnalysis);
+  const scoreData = calculateHealthScore(bristolType, colorAnalysis, volumeAnalysis, previousRecords);
+  const scoreExplanation = generateScoreExplanation(scoreData, bristolType);
   const trend = analyzeTrend(previousRecords, bristolType);
   const urgency = assessUrgency(bristolType, colorAnalysis);
   
@@ -151,7 +152,14 @@ function createHealthAnalysisPrompt({
 
 📊 **Current Analysis Results**:
 - Bristol Stool Scale Type: ${bristolType} ${getBristolDescription(bristolType)}
-- Health Score: ${healthScore}/100
+- Health Score: ${scoreData.score}/100 (Grade: ${scoreData.grade})
+- Score Breakdown:
+  • Bristol Type: ${scoreData.breakdown.bristol}/40
+  • Color Health: ${scoreData.breakdown.color}/30
+  • Volume: ${scoreData.breakdown.volume}/15
+  • Consistency: ${scoreData.breakdown.consistency}/10
+  • Urgency: ${scoreData.breakdown.urgency}/5
+- Score Explanation: ${scoreExplanation.join('; ')}
 - Urgency Level: ${urgency}
 
 ${colorWarnings.length > 0 ? `
@@ -206,7 +214,15 @@ Please provide comprehensive health advice in the following JSON structure:
   "healthStatus": {
     "level": "Choose: excellent/good/attention/warning/critical",
     "summary": "MUST reference the specific findings above (e.g., 'Your Type ${bristolType} stool with ${colorWarnings.length > 0 ? colorWarnings[0].color + ' coloration' : 'normal color'} indicates...')",
-    "score": ${healthScore},
+    "score": ${scoreData.score},
+    "grade": "${scoreData.grade}",
+    "scoreBreakdown": {
+      "bristol": ${scoreData.breakdown.bristol},
+      "color": ${scoreData.breakdown.color},
+      "volume": ${scoreData.breakdown.volume},
+      "consistency": ${scoreData.breakdown.consistency},
+      "urgency": ${scoreData.breakdown.urgency}
+    },
     "confidence": 0.85,
     "mainConcern": "THE MOST CRITICAL issue from the findings above",
     "positiveAspects": "What's actually going well based on the data"
@@ -448,7 +464,8 @@ app.post('/api/health-advice', async (req, res) => {
         bristolType, 
         colorAnalysis, 
         volumeAnalysis,
-        userProfile
+        userProfile,
+        previousRecords  // 🔥 加入歷史記錄
       );
     }
 
@@ -486,7 +503,8 @@ app.post('/api/health-advice', async (req, res) => {
       bristolType, 
       colorAnalysis, 
       volumeAnalysis,
-      userProfile
+      userProfile,
+      previousRecords  // 🔥 加入歷史記錄
     );
 
     res.json({
@@ -530,30 +548,243 @@ app.post('/api/quick-advice', async (req, res) => {
 
 // === Helper Functions ===
 
-// Calculate health score
-function calculateHealthScore(bristolType, colorAnalysis, volumeAnalysis) {
-  let score = 100;
-  
-  const bristolScores = {
-    1: -40, 2: -25, 3: -10, 4: 0, 5: -10, 6: -25, 7: -40
+// 🔥 NEW: Detailed Health Score Calculation System
+function calculateHealthScore(bristolType, colorAnalysis, volumeAnalysis, previousRecords) {
+  let breakdown = {
+    bristol: 0,
+    color: 0,
+    volume: 0,
+    consistency: 0,
+    urgency: 0
   };
-  score += bristolScores[bristolType] || -20;
   
-  // Enhanced color scoring
-  const colorWarnings = extractColorWarnings(colorAnalysis);
-  colorWarnings.forEach(warning => {
-    if (warning.severity === 'critical') score -= 40;
-    else if (warning.severity === 'high') score -= 25;
-    else score -= 10;
-  });
+  // ========================================
+  // 1️⃣ Bristol Type Score (40 points)
+  // ========================================
+  const bristolScores = {
+    1: 10,   // Severe constipation
+    2: 20,   // Constipation
+    3: 32,   // Slightly dry
+    4: 40,   // Ideal ✅
+    5: 32,   // Slightly loose
+    6: 20,   // Diarrhea
+    7: 10    // Severe diarrhea
+  };
+  breakdown.bristol = bristolScores[bristolType] || 15;
   
-  // Enhanced volume scoring
-  const volumeIssues = extractVolumeIssues(volumeAnalysis);
-  volumeIssues.forEach(issue => {
-    score -= 15;
-  });
+  // ========================================
+  // 2️⃣ Color Health Score (30 points)
+  // ========================================
+  let colorScore = 30;
   
-  return Math.max(0, Math.min(100, score));
+  if (colorAnalysis && colorAnalysis.summary) {
+    const colors = Object.entries(colorAnalysis.summary);
+    
+    colors.forEach(([colorName, colorInfo]) => {
+      const status = colorInfo.health_status || colorInfo.status || 'Normal';
+      const percentage = colorInfo.percentage || 0;
+      
+      // Critical colors
+      if (colorName === 'Red' || colorName === 'Black') {
+        if (percentage > 50) colorScore -= 25;
+        else if (percentage > 20) colorScore -= 15;
+        else if (percentage > 5) colorScore -= 8;
+      } 
+      // Green color
+      else if (colorName === 'Green') {
+        if (percentage > 60) colorScore -= 12;
+        else if (percentage > 30) colorScore -= 7;
+        else if (percentage > 10) colorScore -= 3;
+      } 
+      // Yellow color
+      else if (colorName === 'Yellow') {
+        if (percentage > 70) colorScore -= 8;
+        else if (percentage > 40) colorScore -= 4;
+      } 
+      // White/Gray color
+      else if (colorName === 'White' || colorName === 'Gray') {
+        if (percentage > 40) colorScore -= 10;
+        else if (percentage > 20) colorScore -= 5;
+      }
+      
+      // Status-based deduction
+      if (status === 'Critical' || status === 'Alert') {
+        colorScore -= 10;
+      } else if (status === 'Warning') {
+        colorScore -= 5;
+      } else if (status === 'Attention') {
+        colorScore -= 2;
+      }
+    });
+    
+    // Multiple abnormal colors penalty
+    const abnormalCount = colors.filter(([_, info]) => {
+      const status = info.health_status || info.status;
+      return status && status !== 'Normal' && status !== 'Healthy';
+    }).length;
+    
+    if (abnormalCount > 2) colorScore -= 5;
+  }
+  breakdown.color = Math.max(0, colorScore);
+  
+  // ========================================
+  // 3️⃣ Volume Appropriateness (15 points)
+  // ========================================
+  let volumeScore = 15;
+  
+  if (volumeAnalysis) {
+    const volumeClass = volumeAnalysis.overall_volume_class?.toLowerCase();
+    const volumeScoreRaw = volumeAnalysis.volume_score || 0.5;
+    
+    if (volumeClass === 'small') {
+      if (volumeScoreRaw < 0.2) volumeScore -= 12;
+      else if (volumeScoreRaw < 0.4) volumeScore -= 8;
+      else volumeScore -= 4;
+    } else if (volumeClass === 'large') {
+      if (volumeScoreRaw > 0.9) volumeScore -= 10;
+      else if (volumeScoreRaw > 0.8) volumeScore -= 6;
+      else volumeScore -= 3;
+    }
+    
+    // Consistency check with Bristol Type
+    if (bristolType <= 2 && volumeClass === 'large') volumeScore -= 3;
+    else if (bristolType >= 6 && volumeClass === 'small') volumeScore -= 3;
+  }
+  breakdown.volume = Math.max(0, volumeScore);
+  
+  // ========================================
+  // 4️⃣ Consistency/Trend (10 points)
+  // ========================================
+  let consistencyScore = 10;
+  
+  if (previousRecords && previousRecords.length >= 3) {
+    const recentRecords = previousRecords.slice(-7);
+    const types = recentRecords.map(r => r.type || r.bristolType);
+    const average = types.reduce((sum, t) => sum + t, 0) / types.length;
+    
+    // Calculate standard deviation
+    const variance = types.reduce((sum, t) => sum + Math.pow(t - average, 2), 0) / types.length;
+    const stdDev = Math.sqrt(variance);
+    
+    if (stdDev > 2) consistencyScore -= 8;
+    else if (stdDev > 1.5) consistencyScore -= 5;
+    else if (stdDev > 1) consistencyScore -= 2;
+    
+    // Check trend
+    const firstHalf = types.slice(0, Math.floor(types.length / 2));
+    const secondHalf = types.slice(Math.floor(types.length / 2));
+    const firstAvg = firstHalf.reduce((sum, t) => sum + t, 0) / firstHalf.length;
+    const secondAvg = secondHalf.reduce((sum, t) => sum + t, 0) / secondHalf.length;
+    
+    if (secondAvg > 4 && firstAvg <= 4) consistencyScore -= 4;
+    else if (secondAvg < 4 && firstAvg >= 4) consistencyScore -= 4;
+    else if (Math.abs(secondAvg - firstAvg) > 1.5) consistencyScore -= 3;
+    
+    // Extreme values check
+    const extremeCount = types.filter(t => t <= 2 || t >= 6).length;
+    const extremeRatio = extremeCount / types.length;
+    
+    if (extremeRatio > 0.7) consistencyScore -= 5;
+    else if (extremeRatio > 0.5) consistencyScore -= 3;
+  } else if (previousRecords && previousRecords.length > 0) {
+    consistencyScore = 6;
+  } else {
+    consistencyScore = 7;
+  }
+  breakdown.consistency = Math.max(0, consistencyScore);
+  
+  // ========================================
+  // 5️⃣ Urgency (5 points) - Reverse scoring
+  // ========================================
+  let urgencyScore = 5;
+  
+  if (bristolType === 1 || bristolType === 7) urgencyScore -= 4;
+  else if (bristolType === 2 || bristolType === 6) urgencyScore -= 2;
+  
+  if (colorAnalysis && colorAnalysis.summary) {
+    const hasCriticalColor = Object.keys(colorAnalysis.summary).some(c => 
+      c === 'Red' || c === 'Black'
+    );
+    if (hasCriticalColor) urgencyScore -= 3;
+  }
+  breakdown.urgency = Math.max(0, urgencyScore);
+  
+  // ========================================
+  // Final Score
+  // ========================================
+  const totalScore = breakdown.bristol + breakdown.color + breakdown.volume + 
+                     breakdown.consistency + breakdown.urgency;
+  
+  return {
+    score: Math.round(totalScore),
+    breakdown: breakdown,
+    grade: getHealthGrade(totalScore),
+    details: {
+      bristol_contribution: `${breakdown.bristol}/40`,
+      color_contribution: `${breakdown.color}/30`,
+      volume_contribution: `${breakdown.volume}/15`,
+      consistency_contribution: `${breakdown.consistency}/10`,
+      urgency_contribution: `${breakdown.urgency}/5`
+    }
+  };
+}
+
+// Get health grade based on score
+function getHealthGrade(score) {
+  if (score >= 90) return 'A+ (Excellent)';
+  if (score >= 85) return 'A (Excellent)';
+  if (score >= 80) return 'A- (Very Good)';
+  if (score >= 75) return 'B+ (Good)';
+  if (score >= 70) return 'B (Good)';
+  if (score >= 65) return 'B- (Fair)';
+  if (score >= 60) return 'C+ (Needs Attention)';
+  if (score >= 55) return 'C (Needs Attention)';
+  if (score >= 50) return 'C- (Concerning)';
+  if (score >= 45) return 'D+ (Poor)';
+  if (score >= 40) return 'D (Poor)';
+  if (score >= 35) return 'D- (Very Poor)';
+  return 'F (Critical)';
+}
+
+// Generate score explanation
+function generateScoreExplanation(scoreData, bristolType) {
+  const explanations = [];
+  
+  if (scoreData.breakdown.bristol >= 35) {
+    explanations.push('✅ Stool shape is in ideal range');
+  } else if (scoreData.breakdown.bristol >= 25) {
+    explanations.push('⚠️ Stool shape slightly deviates from ideal');
+  } else {
+    explanations.push('❌ Stool shape significantly abnormal, needs improvement');
+  }
+  
+  if (scoreData.breakdown.color >= 25) {
+    explanations.push('✅ Color is healthy and normal');
+  } else if (scoreData.breakdown.color >= 18) {
+    explanations.push('⚠️ Slight color abnormality detected');
+  } else if (scoreData.breakdown.color >= 10) {
+    explanations.push('⚠️ Color abnormality requires attention');
+  } else {
+    explanations.push('❌ Severe color abnormality, medical consultation recommended');
+  }
+  
+  if (scoreData.breakdown.volume >= 12) {
+    explanations.push('✅ Volume is appropriate');
+  } else if (scoreData.breakdown.volume >= 8) {
+    explanations.push('⚠️ Volume slightly abnormal');
+  } else {
+    explanations.push('❌ Volume significantly abnormal');
+  }
+  
+  if (scoreData.breakdown.consistency >= 8) {
+    explanations.push('✅ Bowel habits are stable');
+  } else if (scoreData.breakdown.consistency >= 5) {
+    explanations.push('⚠️ Bowel habits show some fluctuation');
+  } else {
+    explanations.push('❌ Bowel habits highly unstable');
+  }
+  
+  return explanations;
 }
 
 // Analyze trend
@@ -652,8 +883,9 @@ function generateRequestId() {
 }
 
 // 🔥 IMPROVED FALLBACK ADVICE - Now personalized!
-function generateImprovedFallbackAdvice(bristolType, colorAnalysis, volumeAnalysis, userProfile) {
-  const healthScore = calculateHealthScore(bristolType, colorAnalysis, volumeAnalysis);
+function generateImprovedFallbackAdvice(bristolType, colorAnalysis, volumeAnalysis, userProfile, previousRecords) {
+  const scoreData = calculateHealthScore(bristolType, colorAnalysis, volumeAnalysis, previousRecords);
+  const scoreExplanation = generateScoreExplanation(scoreData, bristolType);
   const urgency = assessUrgency(bristolType, colorAnalysis);
   const colorWarnings = extractColorWarnings(colorAnalysis);
   const volumeIssues = extractVolumeIssues(volumeAnalysis);
@@ -764,10 +996,13 @@ function generateImprovedFallbackAdvice(bristolType, colorAnalysis, volumeAnalys
     healthStatus: {
       level: getHealthLevel(bristolType),
       summary: summary,
-      score: healthScore,
+      score: scoreData.score,
+      grade: scoreData.grade,
+      scoreBreakdown: scoreData.breakdown,
+      scoreExplanation: scoreExplanation,
       confidence: 0.75,
       mainConcern: specificConcerns[0] || getMainConcern(bristolType),
-      positiveAspects: healthScore > 60 ? 'Taking proactive steps toward better health' : 'Identified specific areas for improvement'
+      positiveAspects: scoreData.score > 60 ? 'Taking proactive steps toward better health' : 'Identified specific areas for improvement'
     },
     dietaryAdvice: {
       immediateActions: template.diet.slice(0, 2),
@@ -823,7 +1058,7 @@ function generateImprovedFallbackAdvice(bristolType, colorAnalysis, volumeAnalys
       adjustmentTriggers: ['No improvement for 3 days', 'New symptoms appear', ...(colorWarnings.length > 0 ? ['Color intensifies'] : [])]
     },
     personalizedTips: personalizedTips,
-    motivationalMessage: getMotivationalMessage(bristolType, healthScore, specificConcerns),
+    motivationalMessage: getMotivationalMessage(bristolType, scoreData.score, specificConcerns),
     urgencyLevel: urgency,
     doctorConsultation: {
       needed: urgency === 'high' || colorWarnings.some(w => w.severity === 'critical'),
